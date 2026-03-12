@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 PIPE_BUFFER_SIZE = 65536
 MAX_MESSAGE_SIZE = 1024 * 1024  # 1 MB
 
+# Timeouts
+CLIENT_IO_TIMEOUT_MS = 5000  # 5 seconds for client read/write operations
+
+# Mutex name for single-instance enforcement
+DAEMON_MUTEX_NAME = "Global\\TermfixDaemonMutex"
+
 
 class DaemonServer:
     """Named Pipe daemon server for termfix."""
@@ -63,38 +69,51 @@ class DaemonServer:
         self.spellcheck.scan_path()
 
     def _acquire_lock(self) -> bool:
-        """Acquire daemon lock file. Returns False if another instance is running."""
-        self._lock_path = self.config.data_dir / "daemon.lock"
+        """Acquire named mutex for single-instance enforcement.
+
+        Uses a Windows named mutex instead of a lock file to avoid
+        TOCTOU race conditions. The mutex is automatically released
+        when the process exits, even on crash.
+        """
+        import win32api
+        import win32event
+        import winerror
+
         try:
-            if self._lock_path.exists():
-                # Check if the PID in the lock is still alive
-                try:
-                    old_pid = int(self._lock_path.read_text().strip())
-                    # On Windows, check if process exists
-                    import ctypes
-
-                    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-                    handle = kernel32.OpenProcess(0x1000, False, old_pid)  # PROCESS_QUERY_LIMITED
-                    if handle:
-                        kernel32.CloseHandle(handle)
-                        logger.error("Another daemon is running (PID %d)", old_pid)
-                        return False
-                except (ValueError, OSError):
-                    pass
-                # Stale lock — remove it
-                self._lock_path.unlink(missing_ok=True)
-
-            self._lock_path.write_text(str(os.getpid()))
+            self._mutex = win32event.CreateMutex(None, True, DAEMON_MUTEX_NAME)
+            last_error = win32api.GetLastError()
+            if last_error == winerror.ERROR_ALREADY_EXISTS:
+                # Another daemon owns the mutex
+                win32api.CloseHandle(self._mutex)
+                self._mutex = None
+                logger.error("Another daemon instance is already running")
+                return False
+            # Also write PID file for status/diagnostics (non-authoritative)
+            self._pid_path = self.config.data_dir / "daemon.pid"
+            try:
+                self._pid_path.write_text(str(os.getpid()))
+            except OSError:
+                pass
             return True
-        except OSError as e:
-            logger.error("Failed to acquire lock: %s", e)
+        except Exception as e:
+            logger.error("Failed to acquire mutex: %s", e)
             return False
 
     def _release_lock(self) -> None:
-        """Release daemon lock file."""
+        """Release named mutex and clean up PID file."""
+        import win32api
+        import win32event
+
         try:
-            if hasattr(self, "_lock_path"):
-                self._lock_path.unlink(missing_ok=True)
+            if hasattr(self, "_mutex") and self._mutex is not None:
+                win32event.ReleaseMutex(self._mutex)
+                win32api.CloseHandle(self._mutex)
+                self._mutex = None
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_pid_path"):
+                self._pid_path.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -166,9 +185,49 @@ class DaemonServer:
             logger.exception("Error handling request type=%s", request.type)
             return Response.err(str(e))
 
+    @staticmethod
+    def _create_pipe_security_attributes() -> object:
+        """Create SECURITY_ATTRIBUTES restricting pipe access to the current user.
+
+        Returns a pywin32 SECURITY_ATTRIBUTES object with a DACL that grants
+        full access only to the current user's SID, blocking other local users.
+        """
+        import ntsecuritycon as con
+        import win32api
+        import win32security
+
+        # Get the current user's SID
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(),
+            win32security.TOKEN_QUERY,
+        )
+        user_sid = win32security.GetTokenInformation(
+            token, win32security.TokenUser
+        )[0]
+        win32api.CloseHandle(token)
+
+        # Build a DACL granting only the current user full pipe access
+        dacl = win32security.ACL()
+        dacl.AddAccessAllowedAce(
+            win32security.ACL_REVISION,
+            con.FILE_ALL_ACCESS,
+            user_sid,
+        )
+
+        # Create security descriptor with the DACL
+        sd = win32security.SECURITY_DESCRIPTOR()
+        sd.SetSecurityDescriptorDacl(True, dacl, False)
+
+        sa = win32security.SECURITY_ATTRIBUTES()
+        sa.SECURITY_DESCRIPTOR = sd
+        sa.bInheritHandle = False
+
+        return sa
+
     def run(self) -> None:
         """Run the daemon server (blocking). Called in the background process."""
         import pywintypes
+        import win32api
         import win32event
         import win32file
         import win32pipe
@@ -193,12 +252,19 @@ class DaemonServer:
         # Create shutdown event
         shutdown_event = win32event.CreateEvent(None, True, False, SHUTDOWN_EVENT_NAME)
 
+        # Create pipe security attributes (DACL restricting to current user)
+        try:
+            pipe_sa = self._create_pipe_security_attributes()
+        except Exception:
+            logger.warning("Failed to create pipe DACL, using default security")
+            pipe_sa = None
+
         logger.info("Daemon starting (PID %d)", os.getpid())
         self._running = True
 
         try:
             while self._running:
-                # Create pipe instance
+                # Create pipe instance with DACL security
                 pipe_handle = win32pipe.CreateNamedPipe(
                     PIPE_NAME,
                     (
@@ -215,13 +281,14 @@ class DaemonServer:
                     PIPE_BUFFER_SIZE,
                     PIPE_BUFFER_SIZE,
                     0,
-                    None,
+                    pipe_sa,
                 )
 
+                # Create overlapped event for this iteration
+                connect_event = win32event.CreateEvent(None, True, False, None)
                 try:
-                    # Overlapped connect so we can check shutdown event
                     overlapped = pywintypes.OVERLAPPED()
-                    overlapped.hEvent = win32event.CreateEvent(None, True, False, None)
+                    overlapped.hEvent = connect_event
 
                     try:
                         win32pipe.ConnectNamedPipe(pipe_handle, overlapped)
@@ -231,7 +298,7 @@ class DaemonServer:
 
                     # Wait for either a client connection or shutdown
                     result = win32event.WaitForMultipleObjects(
-                        [overlapped.hEvent, shutdown_event],
+                        [connect_event, shutdown_event],
                         False,  # wait for any
                         5000,   # 5 second timeout for periodic maintenance
                     )
@@ -261,6 +328,9 @@ class DaemonServer:
                         win32file.CloseHandle(pipe_handle)
                     except Exception:
                         pass
+                finally:
+                    # Always close the connect event handle (fixes HIGH #4 handle leak)
+                    win32api.CloseHandle(connect_event)
 
         except Exception:
             logger.exception("Fatal daemon error")
@@ -269,17 +339,106 @@ class DaemonServer:
             self.suggest.flush_to_db()
             self.db.close()
             self._release_lock()
-            win32event.CloseHandle(shutdown_event)
+            win32api.CloseHandle(shutdown_event)
             logger.info("Daemon stopped")
 
+    def _read_with_timeout(
+        self, pipe_handle: int, num_bytes: int, timeout_ms: int
+    ) -> bytes | None:
+        """Read from pipe using overlapped I/O with a timeout.
+
+        Returns the data read, or None if the operation timed out.
+        """
+        import pywintypes
+        import win32api
+        import win32event
+        import win32file
+
+        overlapped = pywintypes.OVERLAPPED()
+        overlapped.hEvent = win32event.CreateEvent(None, True, False, None)
+        try:
+            try:
+                hr, data = win32file.ReadFile(pipe_handle, num_bytes, overlapped)
+            except pywintypes.error as e:
+                if e.winerror != 997:  # ERROR_IO_PENDING
+                    raise
+                hr = 997
+
+            if hr == 997:  # IO pending — wait with timeout
+                result = win32event.WaitForSingleObject(
+                    overlapped.hEvent, timeout_ms
+                )
+                if result == win32event.WAIT_TIMEOUT:
+                    # Cancel the pending I/O
+                    try:
+                        win32file.CancelIo(pipe_handle)
+                    except Exception:
+                        pass
+                    return None
+                # Get the result after wait
+                n_bytes = win32file.GetOverlappedResult(pipe_handle, overlapped, True)
+                # For pending reads, data is in the overlapped buffer
+                # Re-read from the completed overlapped operation
+                return bytes(overlapped.object) if hasattr(overlapped, 'object') else data[:n_bytes]
+            else:
+                return bytes(data)
+        finally:
+            win32api.CloseHandle(overlapped.hEvent)
+
+    def _write_with_timeout(
+        self, pipe_handle: int, data: bytes, timeout_ms: int
+    ) -> bool:
+        """Write to pipe using overlapped I/O with a timeout.
+
+        Returns True on success, False on timeout.
+        """
+        import pywintypes
+        import win32api
+        import win32event
+        import win32file
+
+        overlapped = pywintypes.OVERLAPPED()
+        overlapped.hEvent = win32event.CreateEvent(None, True, False, None)
+        try:
+            try:
+                hr, _ = win32file.WriteFile(pipe_handle, data, overlapped)
+            except pywintypes.error as e:
+                if e.winerror != 997:  # ERROR_IO_PENDING
+                    raise
+                hr = 997
+
+            if hr == 997:  # IO pending — wait with timeout
+                result = win32event.WaitForSingleObject(
+                    overlapped.hEvent, timeout_ms
+                )
+                if result == win32event.WAIT_TIMEOUT:
+                    try:
+                        win32file.CancelIo(pipe_handle)
+                    except Exception:
+                        pass
+                    return False
+                win32file.GetOverlappedResult(pipe_handle, overlapped, True)
+            return True
+        finally:
+            win32api.CloseHandle(overlapped.hEvent)
+
     def _handle_client(self, pipe_handle: int) -> None:
-        """Read request from pipe, process it, write response."""
+        """Read request from pipe, process it, write response.
+
+        All I/O uses overlapped operations with CLIENT_IO_TIMEOUT_MS timeout
+        to prevent a malicious or buggy client from blocking the daemon.
+        """
         import win32file
         import win32pipe
 
         try:
-            # Read header (4 bytes)
-            _, header_data = win32file.ReadFile(pipe_handle, HEADER_SIZE)
+            # Read header (4 bytes) with timeout
+            header_data = self._read_with_timeout(
+                pipe_handle, HEADER_SIZE, CLIENT_IO_TIMEOUT_MS
+            )
+            if header_data is None:
+                logger.warning("Client read timed out on header")
+                return
             if len(header_data) < HEADER_SIZE:
                 return
 
@@ -287,21 +446,32 @@ class DaemonServer:
             if payload_size > MAX_MESSAGE_SIZE:
                 response = Response.err("message too large")
             else:
-                # Read payload
-                _, payload_data = win32file.ReadFile(pipe_handle, payload_size)
+                # Read payload with timeout
+                payload_data = self._read_with_timeout(
+                    pipe_handle, payload_size, CLIENT_IO_TIMEOUT_MS
+                )
+                if payload_data is None:
+                    logger.warning("Client read timed out on payload")
+                    return
                 request = decode_request(payload_data)
                 response = self.handle_request(request)
 
-            # Write response
+            # Write response with timeout
             response_bytes = encode_message(response)
-            win32file.WriteFile(pipe_handle, response_bytes)
+            if not self._write_with_timeout(
+                pipe_handle, response_bytes, CLIENT_IO_TIMEOUT_MS
+            ):
+                logger.warning("Client write timed out")
+                return
             win32file.FlushFileBuffers(pipe_handle)
 
         except Exception as e:
             logger.error("Client handling error: %s", e)
             try:
                 err_response = encode_message(Response.err(str(e)))
-                win32file.WriteFile(pipe_handle, err_response)
+                self._write_with_timeout(
+                    pipe_handle, err_response, CLIENT_IO_TIMEOUT_MS
+                )
             except Exception:
                 pass
         finally:

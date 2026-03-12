@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -94,14 +97,43 @@ def install_powershell() -> dict[str, object]:
     hook_source = str(hook_path).replace("\\", "/")
     block = f"\n{HOOK_MARKER_START}\n. \"{hook_source}\"\n{HOOK_MARKER_END}\n"
 
-    with open(profile, "a", encoding="utf-8") as f:
-        f.write(block)
+    # Backup existing profile before modification
+    backup_path: str | None = None
+    if profile.exists():
+        backup = profile.with_suffix(profile.suffix + ".termfix.bak")
+        shutil.copy2(profile, backup)
+        backup_path = str(backup)
+        new_content = existing + block
+    else:
+        new_content = block
 
-    return {
+    # Atomic write: write to temp file then replace
+    tmp_path: str | None = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=profile.parent, prefix=".termfix_tmp_", suffix=".ps1"
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        os.replace(tmp_path, profile)
+        tmp_path = None  # successful replace, no cleanup needed
+    except Exception:
+        # Clean up temp file if replace failed
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+
+    result: dict[str, object] = {
         "success": True,
         "profile_path": profile_path,
         "warning": warning,
     }
+    if backup_path:
+        result["backup_path"] = backup_path
+    return result
 
 
 def uninstall_powershell() -> dict[str, object]:

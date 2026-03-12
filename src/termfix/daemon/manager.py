@@ -43,6 +43,74 @@ def _get_pid_path(config: TermfixConfig) -> Path:
     return config.data_dir / "daemon.pid"
 
 
+# Maximum response size guard (matches server.py)
+MAX_MESSAGE_SIZE = 1024 * 1024  # 1 MB
+
+
+def _read_pipe_with_timeout(handle: int, size: int, timeout_ms: int) -> bytes | None:
+    """Read from pipe using overlapped I/O with timeout. Returns None on timeout."""
+    import pywintypes
+    import win32api
+    import win32event
+    import win32file
+
+    overlapped = pywintypes.OVERLAPPED()
+    overlapped.hEvent = win32event.CreateEvent(None, True, False, None)
+    try:
+        try:
+            hr, data = win32file.ReadFile(handle, size, overlapped)
+        except pywintypes.error as e:
+            if e.winerror != 997:  # ERROR_IO_PENDING
+                raise
+            hr = 997
+
+        if hr == 997:
+            result = win32event.WaitForSingleObject(overlapped.hEvent, timeout_ms)
+            if result == win32event.WAIT_TIMEOUT:
+                try:
+                    win32file.CancelIo(handle)
+                except Exception:
+                    pass
+                return None
+            n_bytes = win32file.GetOverlappedResult(handle, overlapped, True)
+            return bytes(overlapped.object) if hasattr(overlapped, "object") else data[:n_bytes]
+        else:
+            return bytes(data)
+    finally:
+        win32api.CloseHandle(overlapped.hEvent)
+
+
+def _write_pipe_with_timeout(handle: int, data: bytes, timeout_ms: int) -> bool:
+    """Write to pipe using overlapped I/O with timeout. Returns False on timeout."""
+    import pywintypes
+    import win32api
+    import win32event
+    import win32file
+
+    overlapped = pywintypes.OVERLAPPED()
+    overlapped.hEvent = win32event.CreateEvent(None, True, False, None)
+    try:
+        try:
+            hr, _ = win32file.WriteFile(handle, data, overlapped)
+        except pywintypes.error as e:
+            if e.winerror != 997:  # ERROR_IO_PENDING
+                raise
+            hr = 997
+
+        if hr == 997:
+            result = win32event.WaitForSingleObject(overlapped.hEvent, timeout_ms)
+            if result == win32event.WAIT_TIMEOUT:
+                try:
+                    win32file.CancelIo(handle)
+                except Exception:
+                    pass
+                return False
+            win32file.GetOverlappedResult(handle, overlapped, True)
+        return True
+    finally:
+        win32api.CloseHandle(overlapped.hEvent)
+
+
 def _send_pipe_request(request: Request, timeout_ms: int = 2000) -> Response | None:
     """Send a request to the daemon via Named Pipe. Returns None if daemon unreachable."""
     try:
@@ -56,29 +124,47 @@ def _send_pipe_request(request: Request, timeout_ms: int = 2000) -> Response | N
             0,
             None,
             win32file.OPEN_EXISTING,
-            0,
+            win32file.FILE_FLAG_OVERLAPPED,
             None,
         )
 
-        # Set pipe to message mode
-        win32pipe.SetNamedPipeHandleState(
-            handle, win32pipe.PIPE_READMODE_BYTE, None, None
-        )
+        try:
+            # Set pipe to byte-read mode
+            win32pipe.SetNamedPipeHandleState(
+                handle, win32pipe.PIPE_READMODE_BYTE, None, None
+            )
 
-        # Send request
-        request_bytes = encode_message(request)
-        win32file.WriteFile(handle, request_bytes)
+            # Send request
+            request_bytes = encode_message(request)
+            if not _write_pipe_with_timeout(handle, request_bytes, timeout_ms):
+                raise TimeoutError("Write timed out")
 
-        # Read response header
-        _, header_data = win32file.ReadFile(handle, HEADER_SIZE)
-        payload_size = struct.unpack(HEADER_FORMAT, header_data)[0]
+            # Read response header
+            header_data = _read_pipe_with_timeout(handle, HEADER_SIZE, timeout_ms)
+            if header_data is None:
+                raise TimeoutError("Read header timed out")
+            if len(header_data) < HEADER_SIZE:
+                logger.debug("Incomplete header: got %d bytes", len(header_data))
+                return None
 
-        # Read response payload
-        _, payload_data = win32file.ReadFile(handle, payload_size)
-        win32file.CloseHandle(handle)
+            payload_size = struct.unpack(HEADER_FORMAT, header_data)[0]
+            if payload_size > MAX_MESSAGE_SIZE:
+                logger.warning("Response too large: %d bytes", payload_size)
+                return None
 
-        return decode_response(payload_data)
+            # Read response payload
+            payload_data = _read_pipe_with_timeout(handle, payload_size, timeout_ms)
+            if payload_data is None:
+                raise TimeoutError("Read payload timed out")
 
+            return decode_response(payload_data)
+
+        finally:
+            win32file.CloseHandle(handle)
+
+    except TimeoutError as e:
+        logger.debug("Pipe request timed out: %s", e)
+        return None
     except Exception as e:
         logger.debug("Pipe request failed: %s", e)
         return None
@@ -138,15 +224,18 @@ def stop(config: TermfixConfig | None = None) -> bool:
     config = config or TermfixConfig()
 
     try:
+        import win32api
         import win32event
 
         # Signal the shutdown event
         event = win32event.OpenEvent(
             win32event.EVENT_MODIFY_STATE, False, SHUTDOWN_EVENT_NAME
         )
-        win32event.SetEvent(event)
-        win32event.CloseHandle(event)
-        logger.info("Shutdown event sent")
+        try:
+            win32event.SetEvent(event)
+            logger.info("Shutdown event sent")
+        finally:
+            win32api.CloseHandle(event)
 
         # Wait for daemon to stop
         for _ in range(10):
