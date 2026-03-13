@@ -10,6 +10,15 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Austin Kidwell" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: System :: Shells",
+]
 dependencies = [
     "pywin32>=306",
     "rapidfuzz>=3.0",
@@ -17,6 +26,9 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/intellegix/termfix"
 
 [project.optional-dependencies]
 dev = [

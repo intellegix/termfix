@@ -7,12 +7,23 @@ import sys
 import click
 
 from termfix import __version__
+from termfix.config import TermfixConfig
+
+
+def _load_config() -> TermfixConfig:
+    """Load config with graceful error handling for bad TOML / env vars."""
+    try:
+        return TermfixConfig()
+    except Exception as e:
+        click.echo(f"termfix: config error — {e}", err=True)
+        click.echo("Run 'termfix config edit' to fix, or delete config.toml to reset.", err=True)
+        sys.exit(1)
 
 
 @click.group()
 @click.version_option(__version__, prog_name="termfix")
 def main() -> None:
-    """termfix — Windows terminal assistant with spell correction, frecency dirs, and fuzzy suggestions."""
+    """termfix — spell correction, frecency dirs, and fuzzy suggestions."""
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +196,7 @@ def check(command: str) -> None:
     if not results:
         click.echo(f"'{command}' is correct or not found in PATH.")
     else:
-        click.echo(f"Did you mean:")
+        click.echo("Did you mean:")
         for name, dist, path in results:
             click.echo(f"  {name}  (distance={dist})  [{path}]")
 
@@ -214,11 +225,10 @@ def scan() -> None:
 @click.argument("query", required=False)
 def jump(query: str | None) -> None:
     """Navigate to a frecent directory (used by CMD DOSKEY 'j' macro)."""
-    from termfix.config import TermfixConfig
     from termfix.core.frecency import FrecencyEngine
     from termfix.db.database import Database
 
-    config = TermfixConfig()
+    config = _load_config()
     db = Database(config.data_dir / "data.db")
     db.initialize()
     engine = FrecencyEngine(db)
@@ -247,11 +257,10 @@ def jump(query: str | None) -> None:
 @click.argument("path")
 def cd_hook(path: str) -> None:
     """Record a directory change (used by CMD DOSKEY)."""
-    from termfix.config import TermfixConfig
     from termfix.core.frecency import FrecencyEngine
     from termfix.db.database import Database
 
-    config = TermfixConfig()
+    config = _load_config()
     db = Database(config.data_dir / "data.db")
     db.initialize()
     engine = FrecencyEngine(db)
@@ -267,11 +276,10 @@ def cd_hook(path: str) -> None:
 @main.command("import-history")
 def import_history() -> None:
     """Import PSReadLine command history to seed the database."""
-    from termfix.config import TermfixConfig
     from termfix.db.database import Database
     from termfix.importers.psreadline import import_psreadline_history
 
-    config = TermfixConfig()
+    config = _load_config()
     db = Database(config.data_dir / "data.db")
     db.initialize()
 
@@ -293,9 +301,7 @@ def config() -> None:
 @config.command("show")
 def config_show() -> None:
     """Show current configuration."""
-    from termfix.config import TermfixConfig
-
-    cfg = TermfixConfig()
+    cfg = _load_config()
     for key, val in cfg.model_dump().items():
         click.echo(f"  {key}: {val}")
 
@@ -303,9 +309,7 @@ def config_show() -> None:
 @config.command("edit")
 def config_edit() -> None:
     """Open config file in default editor."""
-    from termfix.config import TermfixConfig
-
-    cfg = TermfixConfig()
+    cfg = _load_config()
     toml_path = cfg.data_dir / "config.toml"
     if not toml_path.exists():
         cfg.ensure_data_dir()

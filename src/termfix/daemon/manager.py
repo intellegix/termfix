@@ -114,7 +114,6 @@ def _write_pipe_with_timeout(handle: int, data: bytes, timeout_ms: int) -> bool:
 def _send_pipe_request(request: Request, timeout_ms: int = 2000) -> Response | None:
     """Send a request to the daemon via Named Pipe. Returns None if daemon unreachable."""
     try:
-        import pywintypes
         import win32file
         import win32pipe
 

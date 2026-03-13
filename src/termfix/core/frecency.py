@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 
 from termfix.core.path_utils import normalize_path, path_basename_match, path_contains
@@ -58,7 +59,8 @@ class FrecencyEngine:
             else:
                 dir_id = row["id"]
                 conn.execute(
-                    "UPDATE directories SET last_visit_ts = ?, visit_count = visit_count + 1 WHERE id = ?",
+                    "UPDATE directories SET last_visit_ts = ?,"
+                    " visit_count = visit_count + 1 WHERE id = ?",
                     (now, dir_id),
                 )
 
@@ -75,7 +77,7 @@ class FrecencyEngine:
         self._age_if_needed()
 
     def _recompute_score(
-        self, conn: "sqlite3.Connection", dir_id: int, now: float  # type: ignore[name-defined]
+        self, conn: sqlite3.Connection, dir_id: int, now: float
     ) -> None:
         """Recompute frecency score for a single directory based on its visit history."""
         visits = conn.execute(

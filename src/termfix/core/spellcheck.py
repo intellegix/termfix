@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 
 # Try rapidfuzz, fall back to pure-Python implementation
 try:
-    from rapidfuzz.distance import Levenshtein as _rf_levenshtein
+    from rapidfuzz.distance import Levenshtein as _RfLevenshtein
 
     def _levenshtein_distance(s1: str, s2: str) -> int:
-        return _rf_levenshtein.distance(s1, s2)  # type: ignore[no-any-return]
+        return _RfLevenshtein.distance(s1, s2)  # type: ignore[no-any-return]
 
 except ImportError:
     logger.info("rapidfuzz not available — using pure-Python Levenshtein")

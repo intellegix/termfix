@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 from termfix.core.frecency import FrecencyEngine, _bucket_weight
 from termfix.db.database import Database
 

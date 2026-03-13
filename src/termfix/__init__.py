@@ -1,4 +1,4 @@
-"""termfix — Windows terminal assistant with spell correction, frecency dirs, and command suggestions."""
+"""termfix — spell correction, frecency dirs, and command suggestions."""
 
 __version__ = "0.1.0"
 

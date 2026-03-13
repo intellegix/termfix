@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from termfix.core.spellcheck import SpellChecker, _levenshtein_distance
 
 
@@ -75,7 +77,7 @@ class TestSpellChecker:
         assert count > 0
         assert checker.executable_count == count
 
-    def test_path_hash_refresh(self, patched_path: Path, monkeypatch: "pytest.MonkeyPatch") -> None:
+    def test_path_hash_refresh(self, patched_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         checker = SpellChecker()
         checker.scan_path()
         assert not checker.needs_refresh()

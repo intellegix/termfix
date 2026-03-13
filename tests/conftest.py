@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 import pytest
 
 from termfix.config import TermfixConfig
+from termfix.daemon.server import DaemonServer
 from termfix.db.database import Database
 
 
@@ -59,3 +58,15 @@ def patched_path(fake_path_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Monkeypatch PATH to include only the fake bin directory."""
     monkeypatch.setenv("PATH", str(fake_path_dir))
     return fake_path_dir
+
+
+@pytest.fixture
+def daemon_server(
+    tmp_path: Path, patched_path: Path
+) -> Generator[DaemonServer, None, None]:
+    """Provide an initialized DaemonServer with temp DB and fake PATH."""
+    config = TermfixConfig(data_dir=tmp_path)
+    config.ensure_data_dir()
+    server = DaemonServer(config=config)
+    yield server
+    server.db.close()

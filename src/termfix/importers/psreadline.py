@@ -40,7 +40,10 @@ def _find_psreadline_history() -> Path | None:
             continue
 
     # Fallback to default location
-    default = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "PowerShell" / "PSReadLine" / "ConsoleHost_history.txt"
+    default = (
+        Path.home() / "AppData" / "Roaming" / "Microsoft"
+        / "Windows" / "PowerShell" / "PSReadLine" / "ConsoleHost_history.txt"
+    )
     if default.exists():
         return default
 
@@ -61,7 +64,7 @@ def import_psreadline_history(db: Database) -> dict[str, int]:
 
     lines: list[str] = []
     try:
-        with open(history_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(history_path, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
     except OSError as e:
         logger.error("Failed to read history: %s", e)
@@ -113,8 +116,9 @@ def import_psreadline_history(db: Database) -> dict[str, int]:
                             ).fetchone()
                             if row is None:
                                 cursor = conn.execute(
-                                    "INSERT INTO directories (path, frecency_score, last_visit_ts, visit_count) "
-                                    "VALUES (?, ?, ?, ?)",
+                                    "INSERT INTO directories"
+                                    " (path, frecency_score, last_visit_ts, visit_count)"
+                                    " VALUES (?, ?, ?, ?)",
                                     (normalized, 10.0, fake_ts, 1),
                                 )
                                 dir_id = cursor.lastrowid
@@ -126,7 +130,8 @@ def import_psreadline_history(db: Database) -> dict[str, int]:
                                     (dir_id,),
                                 )
                             conn.execute(
-                                "INSERT INTO directory_visits (directory_id, timestamp) VALUES (?, ?)",
+                                "INSERT INTO directory_visits"
+                                " (directory_id, timestamp) VALUES (?, ?)",
                                 (dir_id, fake_ts),
                             )
                             directories_imported += 1

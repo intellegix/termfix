@@ -7,7 +7,6 @@ import os
 import struct
 import sys
 import time
-from pathlib import Path
 
 from termfix import PIPE_NAME, SHUTDOWN_EVENT_NAME
 from termfix.config import TermfixConfig

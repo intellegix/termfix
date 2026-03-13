@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      - run: ruff check src/ tests/
+      - run: pytest --tb=short -q
+
+  build:
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install hatch
+      - run: hatch build
+      - name: Verify shell hooks in wheel
+        run: |
+          python -c "
+          import zipfile, glob
+          whl = glob.glob('dist/*.whl')[0]
+          with zipfile.ZipFile(whl) as z:
+              names = z.namelist()
+              ps1 = [n for n in names if n.endswith('.ps1')]
+              cmd_files = [n for n in names if n.endswith('.cmd')]
+              assert ps1, 'ERROR: .ps1 missing from wheel!'
+              assert cmd_files, 'ERROR: .cmd missing from wheel!'
+              print('PASS: Shell hooks found in wheel')
+          "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl
